@@ -12,40 +12,81 @@ from tqdm import tqdm
 import comfy
 import comfy.sample
 import comfy.model_management
+import comfy.model_patcher
+import comfy.utils
 import latent_preview
 from enum import Enum
 import json
 
 LLLITE_NONE = "None"
-ANIMA_LLLITE_NODE_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "ComfyUI-Anima-LLLite")
-)
+
+# Anima ControlNet-LLLite is applied via ComfyUI's own native implementation
+# (comfy.ldm.anima.lllite + comfy_extras.nodes_model_patch.AnimaLLLiteApply),
+# not the (now unmaintained) ComfyUI-Anima-LLLite custom node. The native node
+# reads its weights via ModelPatchLoader, which only looks in the
+# `model_patches` model folder; this node keeps its own `controlnet`-folder
+# lookup (see nodes.py:get_lllite_model_names) for backward compatibility, so
+# the state dict is loaded here and wrapped the same way ModelPatchLoader does.
 _ANIMA_LLLITE_APPLY = None
 
 
 def _load_anima_lllite_apply():
+    """Return a cached instance of ComfyUI's native AnimaLLLiteApply node."""
     global _ANIMA_LLLITE_APPLY
     if _ANIMA_LLLITE_APPLY is not None:
         return _ANIMA_LLLITE_APPLY
 
-    init_path = os.path.join(ANIMA_LLLITE_NODE_DIR, "__init__.py")
-    if not os.path.exists(init_path):
-        raise FileNotFoundError(
-            "ComfyUI-Anima-LLLite is not installed. Expected node package: "
-            f"{ANIMA_LLLITE_NODE_DIR}"
-        )
+    try:
+        from comfy_extras.nodes_model_patch import AnimaLLLiteApply
+    except ImportError as exc:
+        raise ImportError(
+            "ComfyUI's native Anima LLLite implementation "
+            "(comfy_extras.nodes_model_patch.AnimaLLLiteApply) was not found. "
+            "Update ComfyUI to a version that ships native Anima LLLite support."
+        ) from exc
 
-    package_name = "_usdu_fls_anima_lllite"
-    spec = importlib.util.spec_from_file_location(
-        package_name,
-        init_path,
-        submodule_search_locations=[ANIMA_LLLITE_NODE_DIR],
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[package_name] = module
-    spec.loader.exec_module(module)
-    _ANIMA_LLLITE_APPLY = module.NODE_CLASS_MAPPINGS["AnimaLLLiteApply"]()
+    _ANIMA_LLLITE_APPLY = AnimaLLLiteApply()
     return _ANIMA_LLLITE_APPLY
+
+
+def _load_anima_lllite_model_patch(weights_path):
+    """Build a MODEL_PATCH from an Anima LLLite weights file using ComfyUI's
+    native comfy.ldm.anima.lllite.AnimaLLLite implementation.
+
+    Mirrors comfy_extras.nodes_model_patch.ModelPatchLoader.load_model_patch,
+    minus the folder_paths lookup (the caller already resolved weights_path
+    from the `controlnet` model folder).
+    """
+    try:
+        import comfy.ldm.anima.lllite
+        import comfy.ops
+    except ImportError as exc:
+        raise ImportError(
+            "ComfyUI's native Anima LLLite implementation "
+            "(comfy.ldm.anima.lllite) was not found. Update ComfyUI to a "
+            "version that ships native Anima LLLite support."
+        ) from exc
+
+    sd, metadata = comfy.utils.load_torch_file(weights_path, safe_load=True, return_metadata=True)
+    if "lllite_conditioning1.conv1.weight" not in sd:
+        raise ValueError(
+            f"'{weights_path}' does not look like an Anima LLLite model patch "
+            "(missing 'lllite_conditioning1.conv1.weight')."
+        )
+    dtype = comfy.utils.weight_dtype(sd)
+    model = comfy.ldm.anima.lllite.AnimaLLLite(
+        sd, metadata,
+        device=comfy.model_management.unet_offload_device(),
+        dtype=dtype,
+        operations=comfy.ops.manual_cast,
+    )
+    model_patcher = comfy.model_patcher.CoreModelPatcher(
+        model,
+        load_device=comfy.model_management.get_torch_device(),
+        offload_device=comfy.model_management.unet_offload_device(),
+    )
+    model.load_state_dict(sd, assign=model_patcher.is_dynamic())
+    return model_patcher
 
 
 def _load_comfy_nodes_module():
@@ -362,15 +403,15 @@ def apply_lllite_tile_patch(p: StableDiffusionProcessing, cond_image):
             f"{p.lllite_model_name} in ComfyUI/models/controlnet"
         )
 
+    model_patch = _load_anima_lllite_model_patch(weights_path)
     applier = _load_anima_lllite_apply()
-    (model_lllite,) = applier.apply(
+    (model_lllite,) = applier.apply_patch(
         p.model,
-        p.lllite_model_name,
+        model_patch,
         cond_image,
         p.lllite_strength,
         p.lllite_start_percent,
         p.lllite_end_percent,
-        preserve_wrapper=True,
         mask=None,
     )
     return model_lllite

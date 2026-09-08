@@ -61,11 +61,11 @@ ComfyUI/custom_nodes/ComfyUI-UltimateSDUpscale-FLS-LLLite/repositories/ultimate_
 
 ## Optional LLLite Setup
 
-`UltimateSDUpscaleFLSLLLite` expects a compatible Anima LLLite apply node to be available in:
-
-```text
-ComfyUI/custom_nodes/ComfyUI-Anima-LLLite
-```
+`UltimateSDUpscaleFLSLLLite` applies Anima ControlNet-LLLite through ComfyUI's
+own native implementation (`comfy.ldm.anima.lllite` /
+`comfy_extras.nodes_model_patch.AnimaLLLiteApply`). No separate LLLite
+node/repository needs to be installed; a recent ComfyUI version that ships
+native Anima LLLite support is all that's required.
 
 Place compatible LLLite weights in:
 
@@ -81,7 +81,7 @@ For the public Anima Tile/Repair LLLite model, see:
 ## Notes
 
 - The FLS node can be used without the optional LLLite dependency.
-- The LLLite node requires the separate LLLite apply node and compatible model weights.
+- The LLLite node requires a ComfyUI version with native Anima LLLite support and compatible model weights; it does not depend on any separate LLLite custom node.
 - No model weights are redistributed here.
 - `examples/anima-fls-lllite-basic` contains a placeholder API-format workflow that shows one possible Anima-style graph. Replace all placeholder model and LoRA filenames before use.
 
